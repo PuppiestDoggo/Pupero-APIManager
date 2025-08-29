@@ -12,6 +12,9 @@ load_dotenv()
 LOGIN_BASE = os.getenv("LOGIN_SERVICE_URL", "http://localhost:8001").rstrip("/")
 OFFERS_BASE = os.getenv("OFFERS_SERVICE_URL", "http://localhost:8002").rstrip("/")
 TRANSACTIONS_BASE = os.getenv("TRANSACTIONS_SERVICE_URL", "http://localhost:8003").rstrip("/")
+# Optional services; provide safe defaults to avoid NameError at import time
+MONERO_BASE = os.getenv("MONERO_SERVICE_URL", "http://localhost:8004").rstrip("/")
+BALANCE_BASE = os.getenv("BALANCE_SERVICE_URL", TRANSACTIONS_BASE).rstrip("/")
 
 HOP_BY_HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -29,6 +32,7 @@ def root():
             "/auth/* -> Login service",
             "/offers and /offers/* -> Offers service",
             "/transactions/* -> Transactions service",
+            "/monero/* -> Monero Wallet Manager",
             "/healthz"
         ]
     }
@@ -111,6 +115,20 @@ async def proxy_transactions_root(request: Request):
     target = TRANSACTIONS_BASE + "/"
     return await _forward(request, target)
 
+# -----------------
+# Monero Wallet Manager -> /monero/*
+# -----------------
+@app.api_route("/monero", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"], tags=["Monero"])  # type: ignore
+async def proxy_monero_root(request: Request):
+    target = MONERO_BASE + "/"
+    return await _forward(request, target)
+
+
+@app.api_route("/monero/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"], tags=["Monero"])  # type: ignore
+async def proxy_monero(request: Request, path: str):
+    target = f"{MONERO_BASE}/{path}" if path else MONERO_BASE + "/"
+    return await _forward(request, target)
+
 
 # -------------
 # OpenAPI proxy endpoints for each service
@@ -142,6 +160,24 @@ async def transactions_openapi_proxy():
         return JSONResponse(status_code=r.status_code, content=r.json())
 
 
+@app.get("/monero/openapi.json", tags=["Docs"])
+async def monero_openapi_proxy():
+    url = f"{MONERO_BASE}/openapi.json"
+    timeout = httpx.Timeout(15.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.get(url)
+        return JSONResponse(status_code=r.status_code, content=r.json())
+
+
+@app.get("/balance/openapi.json", tags=["Docs"])
+async def balance_openapi_proxy():
+    url = f"{BALANCE_BASE}/openapi.json"
+    timeout = httpx.Timeout(15.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.get(url)
+        return JSONResponse(status_code=r.status_code, content=r.json())
+
+
 # -------------
 # Combined OpenAPI aggregation and docs
 # -------------
@@ -154,6 +190,8 @@ async def combined_openapi():
             "auth": LOGIN_BASE,
             "offers": OFFERS_BASE,
             "transactions": TRANSACTIONS_BASE,
+            "monero": MONERO_BASE,
+            "balance": BALANCE_BASE,
         }.items():
             try:
                 resp = await client.get(f"{base}/openapi.json")
@@ -222,24 +260,41 @@ async def combined_openapi():
 
 @app.get("/combined-docs", response_class=HTMLResponse, tags=["Docs"])
 async def combined_docs_page():
+    # Self-contained docs page without any external assets. It simply fetches and displays
+    # the combined OpenAPI JSON in a <pre> block. You can copy the JSON into a local Swagger UI if desired.
     html = """
     <!DOCTYPE html>
     <html>
     <head>
       <meta charset=\"utf-8\"/>
-      <title>Pupero API - Combined Docs</title>
-      <link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css\" />
+      <title>Pupero API - Combined Docs (JSON)</title>
+      <style>
+        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif; margin: 16px; }
+        .controls { margin-bottom: 12px; }
+        pre { white-space: pre-wrap; word-wrap: break-word; background: #f6f8fa; padding: 12px; border: 1px solid #e1e4e8; border-radius: 6px; max-height: 70vh; overflow: auto; }
+        .hint { color: #555; font-size: 0.95em; }
+      </style>
     </head>
     <body>
-      <div id=\"swagger-ui\"></div>
-      <script src=\"https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js\"></script>
+      <h1>Pupero API - Combined OpenAPI</h1>
+      <div class=\"controls\">
+        <button id=\"reload\">Reload</button>
+        <span class=\"hint\">This page shows the raw OpenAPI JSON from <code>/combined-openapi.json</code>.</span>
+      </div>
+      <pre id=\"spec\">Loading...</pre>
       <script>
-        window.onload = () => {
-          window.ui = SwaggerUIBundle({
-            url: '/combined-openapi.json',
-            dom_id: '#swagger-ui',
-          });
-        };
+        async function loadSpec() {
+          const el = document.getElementById('spec');
+          try {
+            const res = await fetch('/combined-openapi.json');
+            const json = await res.json();
+            el.textContent = JSON.stringify(json, null, 2);
+          } catch (e) {
+            el.textContent = 'Failed to load combined OpenAPI: ' + e;
+          }
+        }
+        document.getElementById('reload').addEventListener('click', loadSpec);
+        loadSpec();
       </script>
     </body>
     </html>
