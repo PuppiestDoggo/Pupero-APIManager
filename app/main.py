@@ -9,11 +9,37 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Base service URLs (env-configurable)
-LOGIN_BASE = os.getenv("LOGIN_SERVICE_URL", "http://localhost:8001").rstrip("/")
-OFFERS_BASE = os.getenv("OFFERS_SERVICE_URL", "http://localhost:8002").rstrip("/")
-TRANSACTIONS_BASE = os.getenv("TRANSACTIONS_SERVICE_URL", "http://localhost:8003").rstrip("/")
+
+def _normalize_service_base(val: str | None, name: str) -> str:
+    # name: one of 'login','offers','transactions','monero'
+    defaults = {
+        "login": "http://login:8001",
+        "offers": "http://offers:8002",
+        "transactions": "http://transactions:8003",
+        "monero": "http://monero:8004",
+    }
+    default = defaults.get(name, "")
+    if not val:
+        return default.rstrip("/")
+    v = val.strip().rstrip("/")
+    if "://" in v:
+        return v
+    host = v
+    port = {
+        "login": 8001,
+        "offers": 8002,
+        "transactions": 8003,
+        "monero": 8004,
+    }.get(name, None)
+    if port:
+        return f"http://{host}:{port}"
+    return v
+
+LOGIN_BASE = _normalize_service_base(os.getenv("LOGIN_SERVICE_URL"), "login")
+OFFERS_BASE = _normalize_service_base(os.getenv("OFFERS_SERVICE_URL"), "offers")
+TRANSACTIONS_BASE = _normalize_service_base(os.getenv("TRANSACTIONS_SERVICE_URL"), "transactions")
 # Optional services; provide safe defaults to avoid NameError at import time
-MONERO_BASE = os.getenv("MONERO_SERVICE_URL", "http://localhost:8004").rstrip("/")
+MONERO_BASE = _normalize_service_base(os.getenv("MONERO_SERVICE_URL"), "monero")
 BALANCE_BASE = os.getenv("BALANCE_SERVICE_URL", TRANSACTIONS_BASE).rstrip("/")
 
 HOP_BY_HOP_HEADERS = {
