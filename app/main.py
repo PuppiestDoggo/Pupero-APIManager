@@ -13,10 +13,10 @@ load_dotenv()
 def _normalize_service_base(val: str | None, name: str) -> str:
     # name: one of 'login','offers','transactions','monero'
     defaults = {
-        "login": "http://login:8001",
-        "offers": "http://offers:8002",
-        "transactions": "http://transactions:8003",
-        "monero": "http://monero:8004",
+        "login": "http://pupero-login:8001",
+        "offers": "http://pupero-offers:8002",
+        "transactions": "http://pupero-transactions:8003",
+        "monero": "http://pupero-WalletManager:8004",
     }
     default = defaults.get(name, "")
     if not val:
