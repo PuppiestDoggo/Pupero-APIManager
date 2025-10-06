@@ -49,6 +49,76 @@ HOP_BY_HOP_HEADERS = {
 
 app = FastAPI(title="Pupero API Manager")
 
+# ---- Price cache (Monero) ----
+import asyncio
+import time
+
+PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "600"))
+PRICE_FIAT_CURRENCIES = os.getenv("PRICE_FIAT_CURRENCIES", "USD,EUR").strip()
+PRICE_FIAT_LIST = [c.strip().upper() for c in PRICE_FIAT_CURRENCIES.split(",") if c.strip()]
+PRICE_PROVIDER_URL = os.getenv(
+    "PRICE_PROVIDER_URL",
+    # CoinGecko simple price API
+    "https://api.coingecko.com/api/v3/simple/price?ids=monero&vs_currencies={vs}"
+).strip()
+
+# In-memory cache
+PRICE_CACHE = {
+    "prices": {},          # e.g., {"USD": 152.34, "EUR": 140.12}
+    "updated_at": 0.0,     # epoch seconds
+    "next_update_at": 0.0, # epoch seconds
+    "source": "coingecko"
+}
+
+
+async def _fetch_prices_now():
+    vs = ",".join(PRICE_FIAT_LIST or ["USD"])
+    url = PRICE_PROVIDER_URL.replace("{vs}", vs)
+    timeout = httpx.Timeout(15.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.get(url, headers={"Accept": "application/json"})
+        r.raise_for_status()
+        data = r.json() or {}
+    monero = data.get("monero") or data.get("Monero") or {}
+    prices = {}
+    for fiat in PRICE_FIAT_LIST:
+        key = fiat.lower()
+        val = monero.get(key)
+        try:
+            if val is not None:
+                prices[fiat] = float(val)
+        except Exception:
+            continue
+    if prices:
+        now = time.time()
+        PRICE_CACHE["prices"] = prices
+        PRICE_CACHE["updated_at"] = now
+        PRICE_CACHE["next_update_at"] = now + max(60, PRICE_REFRESH_SECONDS)
+        PRICE_CACHE["source"] = "coingecko"
+
+
+async def _price_background_loop():
+    # Initial small delay to avoid clashing with other startups
+    await asyncio.sleep(2.0)
+    while True:
+        try:
+            await _fetch_prices_now()
+        except Exception:
+            # Keep previous cache on failure; try again later
+            pass
+        await asyncio.sleep(max(60, PRICE_REFRESH_SECONDS))
+
+
+@app.on_event("startup")
+async def _start_price_bg():
+    # Fire-and-forget background task
+    try:
+        asyncio.create_task(_price_background_loop())
+    except Exception:
+        # Environments without running loop (e.g., some ASGI servers) may need different handling,
+        # but FastAPI/uvicorn provides an event loop, so ignore errors here.
+        pass
+
 
 @app.get("/")
 def root():
@@ -59,6 +129,7 @@ def root():
             "/offers and /offers/* -> Offers service",
             "/transactions/* -> Transactions service",
             "/monero/* -> Monero Wallet Manager",
+            "/price -> Cached Monero price (internal)",
             "/healthz"
         ]
     }
@@ -67,6 +138,52 @@ def root():
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+# -------------
+# Price endpoints (cached Monero price)
+# -------------
+@app.get("/price", tags=["Price"])
+async def get_price():
+    now = time.time()
+    # Lazy refresh if cache empty or stale
+    if not PRICE_CACHE.get("prices") or now >= (PRICE_CACHE.get("next_update_at") or 0):
+        # Ensure we don't hammer provider; if last update was very recent (<60s), skip
+        last = PRICE_CACHE.get("updated_at") or 0
+        if now - last >= 60:
+            try:
+                await _fetch_prices_now()
+            except Exception:
+                pass
+    # Build response with human-friendly timestamps
+    return JSONResponse({
+        "symbol": "XMR",
+        "prices": PRICE_CACHE.get("prices", {}),
+        "updated_at": int(PRICE_CACHE.get("updated_at", 0)),
+        "next_update_at": int(PRICE_CACHE.get("next_update_at", 0)),
+        "refresh_seconds": PRICE_REFRESH_SECONDS,
+        "source": PRICE_CACHE.get("source", "unknown"),
+    })
+
+
+@app.get("/price/{fiat}", tags=["Price"])
+async def get_price_fiat(fiat: str):
+    fiat_upper = (fiat or "").strip().upper()
+    base = await get_price()  # type: ignore
+    # base is a JSONResponse; extract data
+    try:
+        data = base.body
+    except Exception:
+        data = None
+    # Simpler: just access cache directly
+    val = PRICE_CACHE.get("prices", {}).get(fiat_upper)
+    return JSONResponse({
+        "symbol": "XMR",
+        "fiat": fiat_upper,
+        "price": val,
+        "updated_at": int(PRICE_CACHE.get("updated_at", 0)),
+        "source": PRICE_CACHE.get("source", "unknown"),
+    })
 
 
 def _filter_headers(headers: Dict[str, str]) -> Dict[str, str]:
