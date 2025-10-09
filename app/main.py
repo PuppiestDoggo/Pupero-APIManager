@@ -139,6 +139,11 @@ def root():
 def healthz():
     return {"status": "ok"}
 
+# Alias for k8s/monitoring expectations
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 
 # -------------
 # Price endpoints (cached Monero price)
