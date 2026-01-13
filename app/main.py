@@ -2,11 +2,56 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, HTMLResponse
 import httpx
 import os
+import logging
+import json
+import time
+from datetime import datetime
 from typing import Dict
 from dotenv import load_dotenv
 
 # Load environment variables from .env if present
 load_dotenv()
+
+# Logger setup
+logger = logging.getLogger("pupero_api_manager")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    # Stdout handler
+    stdout_handler = logging.StreamHandler()
+    logger.addHandler(stdout_handler)
+    # Optional File handler
+    log_file = os.getenv("LOG_FILE")
+    if log_file:
+        try:
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            from logging import FileHandler
+            file_handler = FileHandler(log_file)
+            logger.addHandler(file_handler)
+        except Exception as e:
+            logger.error(json.dumps({"event": "file_logging_setup_failed", "error": str(e)}))
+
+app = FastAPI(title="Pupero API Manager")
+
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = int((time.time() - start_time) * 1000)
+    
+    log_record = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "event": "http_request",
+        "service": "api_manager",
+        "method": request.method,
+        "path": request.url.path,
+        "status": response.status_code,
+        "latency_ms": duration,
+        "client": request.client.host if request.client else None,
+        "user_agent": request.headers.get("User-Agent")
+    }
+    logger.info(json.dumps(log_record))
+    return response
 
 # Base service URLs (env-configurable)
 
@@ -72,6 +117,7 @@ PRICE_CACHE = {
 
 
 async def _fetch_prices_now():
+    logger.info(json.dumps({"event": "price_fetch_start", "currencies": PRICE_FIAT_LIST}))
     vs = ",".join(PRICE_FIAT_LIST or ["USD"])
     url = PRICE_PROVIDER_URL.replace("{vs}", vs)
     timeout = httpx.Timeout(15.0)
@@ -95,6 +141,9 @@ async def _fetch_prices_now():
         PRICE_CACHE["updated_at"] = now
         PRICE_CACHE["next_update_at"] = now + max(60, PRICE_REFRESH_SECONDS)
         PRICE_CACHE["source"] = "coingecko"
+        logger.info(json.dumps({"event": "price_fetch_success", "prices": prices}))
+    else:
+        logger.warning(json.dumps({"event": "price_fetch_no_data", "raw_data": data}))
 
 
 async def _price_background_loop():
@@ -103,8 +152,9 @@ async def _price_background_loop():
     while True:
         try:
             await _fetch_prices_now()
-        except Exception:
+        except Exception as e:
             # Keep previous cache on failure; try again later
+            logger.warning(json.dumps({"event": "price_fetch_error", "error": str(e)}))
             pass
         await asyncio.sleep(max(60, PRICE_REFRESH_SECONDS))
 
@@ -203,12 +253,35 @@ async def _forward(request: Request, url: str) -> Response:
     method = request.method
     params = request.query_params
 
+    logger.info(json.dumps({
+        "event": "proxy_start",
+        "method": method,
+        "url": url,
+        "has_content": bool(content),
+        "params": str(params)
+    }))
+
     timeout = httpx.Timeout(30.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             upstream = await client.request(method, url, content=content, headers=in_headers, params=params)
+        
+        logger.info(json.dumps({
+            "event": "proxy_success",
+            "method": method,
+            "url": url,
+            "status": upstream.status_code,
+            "content_len": len(upstream.content)
+        }))
     except httpx.RequestError as e:
         # Upstream unavailable; return a 502 with context (avoid leaking internal details beyond basics)
+        logger.error(json.dumps({
+            "event": "proxy_error",
+            "method": method,
+            "url": url,
+            "error_type": str(e.__class__.__name__),
+            "error": str(e)
+        }))
         return JSONResponse(status_code=502, content={
             "detail": "Upstream service unavailable",
             "upstream_url": url,
